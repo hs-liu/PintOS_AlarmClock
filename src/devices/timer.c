@@ -7,6 +7,8 @@
 #include "threads/interrupt.h"
 #include "threads/synch.h"
 #include "threads/thread.h"
+#include <list.h>
+#include <stdlib.h>
   
 /* See [8254] for hardware details of the 8254 timer chip. */
 
@@ -19,6 +21,9 @@
 
 /* Number of timer ticks since OS booted. */
 static int64_t ticks;
+
+//initialise a list of semaphrore
+struct list sema_tick_list = LIST_INITIALIZER(sema_tick_list);
 
 /* Number of loops per timer tick.
    Initialized by timer_calibrate(). */
@@ -83,17 +88,50 @@ timer_elapsed (int64_t then)
 {
   return timer_ticks () - then;
 }
+/*
+static void
+sema_tick_init (struct sema_tick *sematick, struct semaphore *sema , int64_t ticks)
+{
+  sematick->ticks = ticks;
+  sematick->sema = sema;
+}*/
+
+/*define the comparison function*/
+bool 
+tick_comparison(const struct list_elem *elem_a, const struct list_elem *elem_b, void *) {
+    /*get the two sema_tick based on the input list_elem*/
+    struct sema_tick *sematick_1 = list_entry(elem_a, struct sema_tick, elem);
+    struct sema_tick *sematick_2 = list_entry(elem_b, struct sema_tick, elem);
+    /*true if tick_a < tick_b, insert elem_a in front of elem_b*/
+    int64_t tick_a = sematick_1->ticks; int64_t tick_b = sematick_2->ticks; 
+    
+    return (tick_a < tick_b);
+};
 
 /* Sleeps for approximately TICKS timer ticks.  Interrupts must
    be turned on. */
 void
 timer_sleep (int64_t ticks) 
 {
-  int64_t start = timer_ticks ();
-
+  /*initialise semaphrore of each thread*/
   ASSERT (intr_get_level () == INTR_ON);
-  while (timer_elapsed (start) < ticks) 
-    thread_yield ();
+
+  /*avoid the case where ticks = 0*/
+  if (ticks > 0) {
+    /*initialies sema_ticks*/
+    struct sema_tick sematick;
+    sema_init(&sematick.sema, 0);
+    /*the end time of sleeping*/
+    sematick.ticks = timer_ticks () + ticks;
+    
+    /*add the sema_tick to the list of sema_tick with order*/
+    /*based on ticks (sleeping time)*/
+    list_insert_ordered(&sema_tick_list, &(sematick.elem), tick_comparison, NULL);
+
+    /*sema down the semaphore of current thread */
+    sema_down(&(sematick.sema));
+  }
+  thread_yield();
 }
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
@@ -171,7 +209,37 @@ static void
 timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
-  thread_tick ();
+  /*check if theres more to remove within one tick*/
+    bool updated = false;
+    do {
+        /*make sure the current list is not empty otherwise will not run*/
+        if (!list_empty(&sema_tick_list)) {
+            /*get the first elem from the sema_tick list*/
+            struct list_elem *front_elem = list_begin(&sema_tick_list);
+
+            /*get the sema_tick from the list_elem using list_entry*/
+            struct sema_tick *front_sema_tick = list_entry(front_elem, struct sema_tick, elem);
+
+            //check the constraint: 
+            if (timer_ticks() >= (front_sema_tick->ticks)) {
+
+                /*sema_up() the semaphore to unblock the thread*/
+                sema_up(&(front_sema_tick->sema));
+
+                /*remove the semotick from the list of sematick*/
+                list_remove(front_elem);
+
+                /*list updated, to check if more to be removed*/
+                updated = true;
+            } else {
+                updated = false;
+            }
+        } else {
+            updated = false;
+        }
+    } while (updated);
+  
+    thread_tick ();
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer
